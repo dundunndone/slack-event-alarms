@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Slack Alarms - Reads events from custom S3 bucket and sends alerts to Slack channel when events exceed threshold. 
+  Function reads events across all regions within target account ID's sub-folder based on selected accountAliases.
+  Deploy template to us-east-1 only.
+Parameters:
+  LambdaLayerName:
+    Type: String
+    Default: lambda-layer
+    Description: Name of Lambda Layer used for Slack Alarms
+  LambdaRoleName:
+    Type: String
+    Default: Slack-Alarms-Role
+    Description: IAM Role name used for Lambda and Slack Alarms
+  LambdaFunctionSlackName:
+    Type: String
+    Default: Slack-Alarms
+    Description: Lambda Function name used Slack Alarms 
+  CloudWatchEventSlackName:
+    Type: String
+    Default: Slack-Alarms-Rule
+    Description: CloudWatch event rule name used Slack Alarms     
+  LambdaBucketName:
+    Type: String
+    Default: ''
+    Description: S3 bucket where Lambda function is stored (.zip file)
+  CustomS3BucketName:
+    Type: String
+    Default: ''
+    Description: S3 Bucket where event logs are stored. 
+  SlackChannels:
+    Type: String
+    Default: ''
+    Description: Add dict of account alias & slackwebhook url {"account-alias":"https://hooks.slack.com/services/"}. Additional entries can be added for multiple accounts & channels using comma.
+  AccountAliases:
+    Type: String
+    Default: ''
+    Description: Add dict of account alias & account ID {"account-alias":"account-id"}. Information should include target AWS accounts only. Additional entries can be added for multiple account aliases & account ID's using comma.
+
+Resources:
+#IAM
+  LambdaSlackEventsRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Ref 'LambdaRoleName'
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+  LambdaSlackEventsPolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      ManagedPolicyName: !Join [ '-' , [!Ref 'LambdaRoleName', 'policy']]
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:  
+          -
+            Sid: MainLambdaLogging
+            Effect: "Allow"
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents                  
+            Resource: 
+              - !Sub "arn:aws:logs:*:${AWS::AccountId}:*"                     
+              - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:*"
+              - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:*:log-stream:*"                   
+          - 
+            Sid: SlackAlerts
+            Effect: Allow
+            Action: 
+              - "s3:List*"               
+              - "s3:GetObject"              
+            Resource: 
+              - !Sub "arn:aws:s3:::${CustomEventLogBucketName}"            
+              - !Sub "arn:aws:s3:::${CustomEventLogBucketName}/*"      
+
+          - 
+            Sid: CustomGetLambda
+            Effect: "Allow"
+            Action:
+              - "s3:GetObject"
+            Resource:
+              - !Sub "arn:aws:s3:::${LambdaBucketName}*"
+              - !Sub "arn:aws:s3:::${LambdaBucketName}*/*"
+          - 
+            Sid: CustomSGEvents
+            Effect: "Allow"
+            Action:
+              - ec2:DescribeStaleSecurityGroups
+              - ec2:DescribeSecurityGroup*
+            Resource: "*"
+          - 
+            Sid: CustomOtherEvents
+            Effect: "Allow"
+            Action:
+              - events:DescribeRule
+            Resource:
+              - !Sub "arn:aws:events:*:${AWS::AccountId}:rule:OtherEvents"            
+      Roles:
+        - !Ref 'LambdaSlackEventsRole' 
+
+#Layer
+  SlackAlarmsLambdaLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Ref 'LambdaLayerName'
+      Description: Dependancies for the requests package for python 3.7
+      Content:
+        S3Bucket: !Ref 'LambdaBucketName'
+        S3Key: !Join [ '', ['LambdaLayer/requests.zip']]
+      CompatibleRuntimes:
+        - python3.7  
+
+#Function
+  SlackAlarmsFunction: 
+    Type: "AWS::Lambda::Function"
+    DependsOn:
+      - SlackAlarmsLambdaLayer
+      - LambdaSlackEventsRole   
+    Properties: 
+      FunctionName: !Ref 'LambdaFunctionSlackName'
+      Description: "Event names with 5 or more errors within 15 minutes"
+      Code: 
+        S3Bucket: !Ref 'LambdaBucketName'
+        S3Key: !Join [ '', ['SlackAlarms/SlackAlarms.zip']]
+      Handler: SlackAlarms.lambda_handler
+      MemorySize: 1024
+      Role: !Sub "arn:aws:iam::${AWS::AccountId}:role/${LambdaRoleName}"
+      Runtime: python3.7
+      Layers: 
+        - !Sub 'arn:aws:lambda:us-east-1:${AWS::AccountId}:layer:${LambdaLayerName}:1'
+      Timeout: 600
+      Environment:
+        Variables:
+          EVENTS_LOGS_BUCKET: !Ref 'CustomEventLogBucketName'
+          SLACK_CHANNELS: !Ref 'SlackChannels'
+          accountAliases: !Ref 'AccountAliases'
+          awsPartition: !Ref 'AWS::Partition'
+  SlackAlarmsCloudWatchRule:
+    Type: "AWS::Events::Rule"
+    Properties:
+      Name: !Ref 'CloudWatchEventSlackName'
+      Description: "Checks events in target bucket on a 15 minute schedule"
+      ScheduleExpression: rate(15 minutes)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt SlackAlarmsFunction.Arn
+          Id: SlackAlarmsFunctionRule
+  SlackAlarmsFunctionLambdaPermission:
+    Type: "AWS::Lambda::Permission"
+    DependsOn:
+      - SlackAlarmsFunction
+    Properties:
+      FunctionName: !GetAtt SlackAlarmsFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt SlackAlarmsCloudWatchRule.Arn
