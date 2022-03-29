@@ -1,4 +1,4 @@
-# Slack Event Alarms [![Deploy](https://github.com/dundunndone/slack-event-alarms/actions/workflows/manual.yml/badge.svg?event=push)](https://github.com/dundunndone/slack-event-alarms/actions/workflows/manual.yml)
+# Slack Event Alarms [![Deploy](https://github.com/dundunndone/slack-event-alarms/actions/workflows/manual.yml/badge.svg?branch=main)](https://github.com/dundunndone/slack-event-alarms/actions/workflows/manual.yml)
 Provides Slack notifications on errors from AWS accounts using CloudWatch Event Rules.
 
 ## Purpose
